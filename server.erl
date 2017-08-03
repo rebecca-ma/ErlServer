@@ -3,10 +3,7 @@
 
 launch(Port) ->
     Response = gen_tcp:listen(Port, [{active, true}, binary]),
-    Listener_Pid = spawn(fun() -> listen(Response) end),
-    io:format("Launched Listener~n", []),
-    register(master, spawn(fun() -> master([], Listener_Pid) end)),
-    io:format("Launched and Registered Master~n", []).
+    check_listen_socket(Response).
 
 stop() ->
     master!stop.
@@ -16,37 +13,24 @@ print_slaves() ->
 
 %-----------------
 
-master(Slaves, Listener_Pid) ->
-    process_flag(trap_exit, true),
-    link(Listener_Pid),
-    receive
-        stop ->
-            io:format("Master received exit command~n", []),
-            kill_slaves(Slaves);
-        print_slaves ->
-            io:format("~p~n", [Slaves]),
-            master(Slaves, Listener_Pid);
-        {'EXIT', Listener_Pid, Data} ->
-            io:format("Listener exited unexpectedly~n", []),
-            kill_slaves(Slaves);
-        {'EXIT', Pid, Data} ->
-            io:format("Process ~p exited~n", [Pid]),
-            master(lists:filter(fun (Sid) -> Sid /= Pid end, Slaves),
-                    Listener_Pid);
-        {new, Pid} ->
-            io:format("New slave with Pid ~p~n", [Pid]),
-            link(Pid),
-            master([Pid | Slaves], Listener_Pid)
-    end.
+check_listen_socket({ok, Socket}) ->
+    Listener_Pid = spawn(fun() -> listen(Socket) end),
+    io:format("Launched Listener~n", []),
+    register(master, spawn(fun() -> master([], Listener_Pid, Socket) end)),
+    io:format("Launched and Registered Master~n", []);
+check_listen_socket({error, Reason}) ->
+    io:format("Listen Socket couldn't be opened: ~p~n", [Reason]).
 
-listen({ok, Socket}) ->
-    {ok, AcceptSocket} = gen_tcp:accept(Socket),
+check_accept_socket({ok, AcceptSocket}, ListenSocket) ->
     Pid = spawn(fun() -> handle(AcceptSocket) end),
     gen_tcp:controlling_process(AcceptSocket, Pid),
     master!{new, Pid},
-    listen({ok, Socket});
-listen({error, Error}) ->
-    io:format("Could not listen: ~p~n", [Error]).
+    listen(ListenSocket);
+check_accept_socket({error, closed}, _) ->
+    io:format("Listen Socket has closed~n", []);
+check_accept_socket({error, Reason}, ListenSocket) ->
+    io:format("Could not accept an incoming connection: ~p~n", [Reason]),
+    listen(ListenSocket).
 
 handle(Socket) ->
     receive
@@ -68,4 +52,32 @@ kill_slaves([Slave | Slaves]) ->
     io:format("Killing slave ~p~n", [Slave]),
     Slave!stop,
     kill_slaves(Slaves).
+
+listen(Socket) ->
+    Response = gen_tcp:accept(Socket),
+    check_accept_socket(Response, Socket).
+
+master(Slaves, Listener_Pid, ListenSocket) ->
+    process_flag(trap_exit, true),
+    link(Listener_Pid),
+    receive
+        stop ->
+            io:format("Master received exit command~n", []),
+            gen_tcp:close(ListenSocket),
+            kill_slaves(Slaves);
+        print_slaves ->
+            io:format("~p~n", [Slaves]),
+            master(Slaves, Listener_Pid, ListenSocket);
+        {'EXIT', Listener_Pid, Data} ->
+            io:format("Listener exited unexpectedly: ~p~n", [Data]),
+            kill_slaves(Slaves);
+        {'EXIT', Pid, Data} ->
+            io:format("Process ~p exited: ~p~n", [Pid, Data]),
+            master(lists:filter(fun (Sid) -> Sid /= Pid end, Slaves),
+                    Listener_Pid, ListenSocket);
+        {new, Pid} ->
+            io:format("New slave with Pid ~p~n", [Pid]),
+            link(Pid),
+            master([Pid | Slaves], Listener_Pid, ListenSocket)
+    end.
 

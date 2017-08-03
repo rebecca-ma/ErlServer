@@ -2,4 +2,4 @@
 -export([response/1]).
 
 response(Message) ->
-    string:concat("I heard you say ", Message).
+    string:concat("Message received: ", Message).
